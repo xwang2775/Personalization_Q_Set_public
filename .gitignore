@@ -1,0 +1,23 @@
+# Environment variables (never commit these)
+.env
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+*.egg-info/
+
+# Node
+frontend/node_modules/
+frontend/build/
+
+# Database (raw data, keep local)
+backend/data/study.db
+
+# macOS
+.DS_Store
+*/.DS_Store
+
+# Cache
+frontend/node_modules/.cache/
