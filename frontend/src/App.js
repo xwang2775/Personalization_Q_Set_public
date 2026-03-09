@@ -7,7 +7,7 @@ const API = process.env.REACT_APP_API_URL || '';
 
 async function api(path, options = {}) {
   const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
     ...options,
   });
   if (!res.ok) throw new Error(`API error: ${res.status}`);

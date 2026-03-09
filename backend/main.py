@@ -144,12 +144,25 @@ def get_llm_client():
     )
 
 
+def _intensity(score: int, max_score: int) -> tuple[str, bool]:
+    """Return (adverb, is_high_end) based on score position on the scale."""
+    midpoint = (max_score + 1) / 2
+    ratio = score / max_score
+    high = score >= midpoint
+    if ratio >= 6/7 or ratio <= 1/7:
+        adverb = "strongly"
+    elif ratio >= 5/7 or ratio <= 2/7:
+        adverb = "moderately"
+    else:
+        adverb = "slightly"
+    return adverb, high
+
+
 def build_system_prompt(profile_answers: dict, item_ids: list[str]) -> str:
     """
     Construct a system prompt that includes the user's answers to the
     specified subset of profiling items.
     """
-    # Build the profile description from the subset
     question_lookup = {q["id"]: q for q in PROFILING_QUESTIONS}
     profile_lines = []
 
@@ -162,33 +175,47 @@ def build_system_prompt(profile_answers: dict, item_ids: list[str]) -> str:
         if q["type"] == "bipolar7":
             left = q.get("left_anchor", "")
             right = q.get("right_anchor", "")
-            profile_lines.append(
-                f"- Scenario: {q['text']} — On a scale from \"{left}\" (1) to \"{right}\" (7), "
-                f"this user chose: {answer}/7"
-            )
-        elif q["type"] == "likert7":
-            anchors = q.get("anchors", ["1", "7"])
-            profile_lines.append(f"- {q['text']} — Response: {answer}/7 ({anchors[0]} to {anchors[1]})")
-        elif q["type"] == "likert6":
-            anchors = q.get("anchors", ["1", "6"])
-            profile_lines.append(f"- {q['text']} — Response: {answer}/6 ({anchors[0]} to {anchors[1]})")
-        elif q["type"] == "likert5":
-            anchors = q.get("anchors", ["1", "5"])
+            adverb, high = _intensity(answer, 7)
+            pole = right if high else left
+            midpoint = 4
+            if answer == midpoint:
+                line = f"- In this scenario: \"{q['text']}\" — This person is balanced between \"{left}\" and \"{right}\" (rated {answer}/7)"
+            else:
+                line = f"- In this scenario: \"{q['text']}\" — This person {adverb} leans toward \"{pole}\" (rated {answer}/7)"
+            profile_lines.append(line)
+
+        elif q["type"] in ("likert7", "likert6", "likert5"):
+            max_score = {"likert7": 7, "likert6": 6, "likert5": 5}[q["type"]]
+            anchors = q.get("anchors", ["low", "high"])
+            low_anchor, high_anchor = anchors[0], anchors[1]
             stem = q.get("stem", "")
-            display_text = f"{stem} {q['text']}" if stem else q["text"]
-            profile_lines.append(f"- \"{display_text}\" — Response: {answer}/5 ({anchors[0]} to {anchors[1]})")
+            text = f"{stem} {q['text']}".strip() if stem else q["text"]
+            # Convert first-person phrasing to third-person
+            text = text.replace("I ", "this person ").replace(" my ", " their ").replace("My ", "Their ")
+            adverb, high = _intensity(answer, max_score)
+            midpoint = (max_score + 1) / 2
+            if answer == midpoint:
+                line = f"- This person is neutral on: \"{text}\" (rated {answer}/{max_score})"
+            elif high:
+                line = f"- This person {adverb} agrees that {text.lower().rstrip('.')} (rated {answer}/{max_score}; scale: {low_anchor} → {high_anchor})"
+            else:
+                line = f"- This person {adverb} disagrees that {text.lower().rstrip('.')} (rated {answer}/{max_score}; scale: {low_anchor} → {high_anchor})"
+            profile_lines.append(line)
+
         elif q["type"] == "forced_choice":
             if isinstance(answer, int) and "options" in q:
                 answer_text = q["options"][answer] if answer < len(q["options"]) else str(answer)
             else:
                 answer_text = str(answer)
-            profile_lines.append(f"- {q['text']} — Chose: \"{answer_text}\"")
+            profile_lines.append(f"- When asked \"{q['text']}\", this person chose: \"{answer_text}\"")
+
         elif q["type"] == "free_text":
-            profile_lines.append(f"- {q['text']} — Their response: \"{answer}\"")
+            profile_lines.append(f"- When asked \"{q['text']}\", this person responded: \"{answer}\"")
+
         elif q["type"] == "ranking":
             if isinstance(answer, list):
                 ranking_str = " > ".join(str(a) for a in answer)
-                profile_lines.append(f"- {q['text']} — Ranking (most to least interesting): {ranking_str}")
+                profile_lines.append(f"- This person ranked the following from most to least interesting: {ranking_str} (question: \"{q['text']}\")")
             else:
                 profile_lines.append(f"- {q['text']} — Response: {answer}")
 
