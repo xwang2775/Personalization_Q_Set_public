@@ -166,7 +166,7 @@ PROFILING_QUESTIONS = [
     # ==============================================================
     {
         "id": "p1", "tier": "projective", "section": "projective",
-        "text": "Which bothers you more?",
+        "text": "Who do you prefer?",
         "type": "forced_choice",
         "options": ["Someone who's kind but a bit incompetent", "Someone who's blunt but gets things done well"],
     },
@@ -300,20 +300,98 @@ PROFILING_QUESTIONS = [
 # Total: 80 items (20 vignettes + 12 projective + 18 primals + 30 BFI)
 
 TASKS = [
-    {"id": "task_advice", "category": "advice_seeking", "prompt": "I've been thinking about switching careers to something more creative, but I'm worried about financial stability. What should I consider?"},
-    {"id": "task_explain", "category": "explanation", "prompt": "Can you explain how compound interest works and why people say it's so powerful?"},
+    {"id": "task_advice", "category": "advice_seeking", "prompt": "I have a friend who I feel like has been pulling away lately. I don't know if I did something wrong or if they're just going through their own stuff. How should I handle this?"},
+    {"id": "task_explain", "category": "explanation", "prompt": "I always feel tired even when I get a full night's sleep. Why does that happen, and what can I actually do about it?"},
     {"id": "task_emotional", "category": "emotional", "prompt": "I had a really frustrating day at work \u2014 I kept sharing ideas in a meeting and they were either ignored or someone else got credit for them. What do you think I should do?"},
     {"id": "task_planning", "category": "planning", "prompt": "I want to start eating healthier but I'm busy and not a great cook. Can you help me plan meals for the week?"},
-    {"id": "task_creative", "category": "creative", "prompt": "I need to write a thank-you note to a mentor who really shaped my career trajectory. Can you help me draft something?"},
-    {"id": "task_recommendation", "category": "recommendation", "prompt": "I want to understand economics better but I find most textbooks dry. What would you recommend?"},
-    {"id": "task_howto", "category": "technical", "prompt": "My kitchen faucet has been dripping and it's driving me crazy. How do I fix a leaky faucet?"},
-    {"id": "task_ambiguous", "category": "value_laden", "prompt": "I'm trying to decide whether to rent or buy a home. What are your thoughts?"},
+    {"id": "task_creative", "category": "creative", "prompt": "I need to write a thank-you message to someone who really helped me through a tough time. Can you help me figure out what to say?"},
+    {"id": "task_recommendation", "category": "recommendation", "prompt": "I want to pick up a new hobby but I have no idea where to start. I've got a few hours a week and a modest budget. Any suggestions?"},
+    {"id": "task_howto", "category": "technical", "prompt": "I have to give a short presentation at work next week and I'm nervous about public speaking. How should I prepare?"},
+    {"id": "task_ambiguous", "category": "value_laden", "prompt": "I've been feeling like I have no work-life balance lately. Everything blurs together and I'm always either working or thinking about work. How do people actually deal with this?"},
 ]
 
+# ── Attention Checks ──────────────────────────────────────────────
+# These are inserted into the profiling flow but NEVER included in
+# schedule subsets or LLM prompts. They are used to flag inattentive
+# participants for potential exclusion.
+
+ATTENTION_CHECKS = [
+    {
+        "id": "attn_vignette",
+        "tier": "dimension_verbosity",
+        "section": "vignettes",
+        "type": "bipolar7",
+        "text": "This is an attention check. Please select 2 on the scale below.",
+        "left_anchor": "Left option",
+        "right_anchor": "Right option",
+        "is_attention_check": True,
+        "expected_answer": 2,
+        "insert_after": "v3",
+    },
+    {
+        "id": "attn_projective",
+        "tier": "projective",
+        "section": "projective",
+        "type": "forced_choice",
+        "text": "This is an attention check. Please select the second option.",
+        "options": ["Do not select this option", "Select this option"],
+        "is_attention_check": True,
+        "expected_answer": 1,
+        "insert_after": "p6",
+    },
+    {
+        "id": "attn_primals",
+        "tier": "primals",
+        "section": "primals",
+        "type": "likert6",
+        "text": "To make sure you are reading carefully, please select Strongly Disagree (1) for this item.",
+        "anchors": ["Strongly Disagree", "Strongly Agree"],
+        "is_attention_check": True,
+        "expected_answer": 1,
+        "insert_after": "pi_9",
+    },
+    {
+        "id": "attn_eval_1",
+        "type": "eval_attention",
+        "text": "This is an attention check. Please select 2 on the scale below.",
+        "is_attention_check": True,
+        "expected_answer": 2,
+        "in_task": 1,
+    },
+    {
+        "id": "attn_eval_2",
+        "type": "eval_attention",
+        "text": "Please read carefully and select 6 for this item.",
+        "is_attention_check": True,
+        "expected_answer": 6,
+        "in_task": 4,
+    },
+    {
+        "id": "attn_eval_3",
+        "type": "eval_attention",
+        "text": "To confirm you are paying attention, please select 1 below.",
+        "is_attention_check": True,
+        "expected_answer": 1,
+        "in_task": 6,
+    },
+]
+
+def get_profiling_questions_with_attention_checks():
+    """Return profiling questions with attention checks inserted at specified positions."""
+    questions = list(PROFILING_QUESTIONS)
+    profiling_checks = [ac for ac in ATTENTION_CHECKS if ac.get("insert_after")]
+    for check in reversed(profiling_checks):
+        anchor = check["insert_after"]
+        for i, q in enumerate(questions):
+            if q["id"] == anchor:
+                questions.insert(i + 1, check)
+                break
+    return questions
+
 EVALUATION_ITEMS = [
-    {"id": "eval_content", "text": "This response focused on what mattered to me.", "dimension": "content"},
-    {"id": "eval_tone", "text": "The way this was communicated felt right for me.", "dimension": "tone"},
-    {"id": "eval_amount", "text": "The level of detail was right for me.", "dimension": "amount"},
-    {"id": "eval_agency", "text": "The level of initiative the assistant took felt right for me.", "dimension": "agency"},
-    {"id": "eval_overall", "text": "This response felt like it was written for me.", "dimension": "overall"},
+    {"id": "eval_tone", "text": "The tone of this response felt right for me \u2014 not too casual, not too formal, not too warm or too cold.", "dimension": "tone"},
+    {"id": "eval_verbosity", "text": "The amount of detail was right for me \u2014 not too brief, not too lengthy.", "dimension": "verbosity"},
+    {"id": "eval_structure", "text": "The way the response was organized worked for me \u2014 whether it used lists, paragraphs, sections, or flowing prose.", "dimension": "structure"},
+    {"id": "eval_initiative", "text": "The assistant took the right level of initiative \u2014 it didn't overreach, but it also didn't hold back when I would have wanted more.", "dimension": "initiative"},
+    {"id": "eval_overall", "text": "Overall, this response felt like it was written for someone like me.", "dimension": "overall"},
 ]

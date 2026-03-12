@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import AzureOpenAI
 
-from questions import PROFILING_QUESTIONS, TASKS, EVALUATION_ITEMS
+from questions import PROFILING_QUESTIONS, TASKS, EVALUATION_ITEMS, ATTENTION_CHECKS, get_profiling_questions_with_attention_checks
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -76,11 +76,12 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 task_id TEXT NOT NULL,
-                eval_content INTEGER,
                 eval_tone INTEGER,
-                eval_amount INTEGER,
-                eval_agency INTEGER,
+                eval_verbosity INTEGER,
+                eval_structure INTEGER,
+                eval_initiative INTEGER,
                 eval_overall INTEGER,
+                eval_relevance INTEGER,
                 open_ended TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
@@ -89,6 +90,17 @@ def init_db():
             CREATE TABLE IF NOT EXISTS schedule_claims (
                 schedule_id INTEGER PRIMARY KEY,
                 claimed INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS attention_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                check_id TEXT NOT NULL,
+                expected INTEGER NOT NULL,
+                actual INTEGER NOT NULL,
+                passed INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
         """)
 
@@ -144,25 +156,12 @@ def get_llm_client():
     )
 
 
-def _intensity(score: int, max_score: int) -> tuple[str, bool]:
-    """Return (adverb, is_high_end) based on score position on the scale."""
-    midpoint = (max_score + 1) / 2
-    ratio = score / max_score
-    high = score >= midpoint
-    if ratio >= 6/7 or ratio <= 1/7:
-        adverb = "strongly"
-    elif ratio >= 5/7 or ratio <= 2/7:
-        adverb = "moderately"
-    else:
-        adverb = "slightly"
-    return adverb, high
-
-
 def build_system_prompt(profile_answers: dict, item_ids: list[str]) -> str:
     """
     Construct a system prompt that includes the user's answers to the
     specified subset of profiling items.
     """
+    # Build the profile description from the subset
     question_lookup = {q["id"]: q for q in PROFILING_QUESTIONS}
     profile_lines = []
 
@@ -175,59 +174,89 @@ def build_system_prompt(profile_answers: dict, item_ids: list[str]) -> str:
         if q["type"] == "bipolar7":
             left = q.get("left_anchor", "")
             right = q.get("right_anchor", "")
-            adverb, high = _intensity(answer, 7)
-            pole = right if high else left
-            midpoint = 4
-            if answer == midpoint:
-                line = f"- In this scenario: \"{q['text']}\" — This person is balanced between \"{left}\" and \"{right}\" (rated {answer}/7)"
-            else:
-                line = f"- In this scenario: \"{q['text']}\" — This person {adverb} leans toward \"{pole}\" (rated {answer}/7)"
-            profile_lines.append(line)
-
-        elif q["type"] in ("likert7", "likert6", "likert5"):
-            max_score = {"likert7": 7, "likert6": 6, "likert5": 5}[q["type"]]
-            anchors = q.get("anchors", ["low", "high"])
-            low_anchor, high_anchor = anchors[0], anchors[1]
+            profile_lines.append(
+                f"- Scenario: {q['text']} — On a scale from \"{left}\" (1) to \"{right}\" (7), "
+                f"this user chose: {answer}/7"
+            )
+        elif q["type"] == "likert7":
+            anchors = q.get("anchors", ["1", "7"])
+            profile_lines.append(f"- {q['text']} — Response: {answer}/7 ({anchors[0]} to {anchors[1]})")
+        elif q["type"] == "likert6":
+            anchors = q.get("anchors", ["1", "6"])
+            profile_lines.append(f"- {q['text']} — Response: {answer}/6 ({anchors[0]} to {anchors[1]})")
+        elif q["type"] == "likert5":
+            anchors = q.get("anchors", ["1", "5"])
             stem = q.get("stem", "")
-            text = f"{stem} {q['text']}".strip() if stem else q["text"]
-            # Convert first-person phrasing to third-person
-            text = text.replace("I ", "this person ").replace(" my ", " their ").replace("My ", "Their ")
-            adverb, high = _intensity(answer, max_score)
-            midpoint = (max_score + 1) / 2
-            if answer == midpoint:
-                line = f"- This person is neutral on: \"{text}\" (rated {answer}/{max_score})"
-            elif high:
-                line = f"- This person {adverb} agrees that {text.lower().rstrip('.')} (rated {answer}/{max_score}; scale: {low_anchor} → {high_anchor})"
-            else:
-                line = f"- This person {adverb} disagrees that {text.lower().rstrip('.')} (rated {answer}/{max_score}; scale: {low_anchor} → {high_anchor})"
-            profile_lines.append(line)
-
+            display_text = f"{stem} {q['text']}" if stem else q["text"]
+            profile_lines.append(f"- \"{display_text}\" — Response: {answer}/5 ({anchors[0]} to {anchors[1]})")
         elif q["type"] == "forced_choice":
             if isinstance(answer, int) and "options" in q:
                 answer_text = q["options"][answer] if answer < len(q["options"]) else str(answer)
             else:
                 answer_text = str(answer)
-            profile_lines.append(f"- When asked \"{q['text']}\", this person chose: \"{answer_text}\"")
-
+            profile_lines.append(f"- {q['text']} — Chose: \"{answer_text}\"")
         elif q["type"] == "free_text":
-            profile_lines.append(f"- When asked \"{q['text']}\", this person responded: \"{answer}\"")
-
+            profile_lines.append(f"- {q['text']} — Their response: \"{answer}\"")
         elif q["type"] == "ranking":
             if isinstance(answer, list):
                 ranking_str = " > ".join(str(a) for a in answer)
-                profile_lines.append(f"- This person ranked the following from most to least interesting: {ranking_str} (question: \"{q['text']}\")")
+                profile_lines.append(f"- {q['text']} — Ranking (most to least interesting): {ranking_str}")
             else:
                 profile_lines.append(f"- {q['text']} — Response: {answer}")
 
     profile_section = "\n".join(profile_lines)
 
-    system_prompt = f"""You are a helpful AI assistant. The following information has been shared by the user you are about to interact with. Use this information to adapt your communication style, tone, level of detail, content focus, and level of initiative to best fit this particular person. Do not mention that you have this information or refer to it explicitly. Simply let it naturally shape how you respond.
+#     system_prompt = f"""You are a helpful AI assistant. The following information has been shared by the user you are about to interact with. Use this information to adapt your communication style, tone, level of detail, content focus, and level of initiative to best fit this particular person. Do not mention that you have this information or refer to it explicitly. Simply let it naturally shape how you respond.
 
+# USER PROFILE:
+# {profile_section}
+
+# Adapt your response naturally based on what you know about this person. Consider how they might prefer information to be presented — the content they'd find most relevant, the tone that would resonate with them, how much detail they'd want, and how much initiative they'd like you to take versus leaving decisions to them."""
+
+    system_prompt = f"""You are a helpful AI assistant. You have been given information 
+
+ about the user you are about to interact with. Use this information to strongly 
+
+ adapt your response along four dimensions:
+ 
+1. TONE: How warm/cold, formal/casual, supportive/direct should you be? Pay 
+
+    attention to their preferences about emotional acknowledgment, formality, 
+
+    and communication style.
+ 
+2. VERBOSITY: How much detail should you provide? Some users want concise key 
+
+    points, others want comprehensive explanations. Adjust the length and depth 
+
+    of your response accordingly.
+ 
+3. STRUCTURE: How should you organize your response? Some users prefer bullet 
+
+    points, headers, and structured layouts. Others prefer flowing conversational 
+
+    prose. Match their preference.
+ 
+4. INITIATIVE: How proactive should you be? Some users want you to anticipate 
+
+    needs, suggest next steps, and flag things they haven't asked about. Others 
+
+    want you to answer exactly what was asked and nothing more.
+ 
 USER PROFILE:
-{profile_section}
 
-Adapt your response naturally based on what you know about this person. Consider how they might prefer information to be presented — the content they'd find most relevant, the tone that would resonate with them, how much detail they'd want, and how much initiative they'd like you to take versus leaving decisions to them."""
+ {profile_section}
+ 
+IMPORTANT: Make strong, clear adaptations based on this profile. Two users with 
 
+ different profiles should receive noticeably different responses to the same 
+
+ question. Do not default to a generic middle-ground style. Do not mention that 
+
+ you have this profile information or refer to it explicitly.
+
+ """
+ 
     return system_prompt
 
 
@@ -260,17 +289,25 @@ class ProfilingSubmission(BaseModel):
 class EvaluationSubmission(BaseModel):
     session_id: str
     task_id: str
-    eval_content: int
     eval_tone: int
-    eval_amount: int
-    eval_agency: int
+    eval_verbosity: int
+    eval_structure: int
+    eval_initiative: int
     eval_overall: int
+    eval_relevance: int
     open_ended: str = ""
 
 
 class PostStudySubmission(BaseModel):
     session_id: str
     data: dict
+
+
+class AttentionCheckSubmission(BaseModel):
+    session_id: str
+    check_id: str
+    expected: int
+    actual: int
 
 
 # ── API Routes ────────────────────────────────────────────────────────────────
@@ -291,8 +328,12 @@ def startup():
 
 @app.get("/api/questions")
 def get_questions():
-    """Return the full set of profiling questions."""
-    return {"questions": PROFILING_QUESTIONS}
+    """Return profiling questions with attention checks inserted."""
+    eval_attn_checks = {str(ac["in_task"]): ac for ac in ATTENTION_CHECKS if ac.get("in_task") is not None}
+    return {
+        "questions": get_profiling_questions_with_attention_checks(),
+        "eval_attention_checks": eval_attn_checks,
+    }
 
 
 @app.get("/api/evaluation-items")
@@ -345,6 +386,19 @@ def submit_profiling(submission: ProfilingSubmission):
             "UPDATE sessions SET profiling_data = ?, status = 'generating' WHERE session_id = ?",
             (json.dumps(submission.answers), session_id),
         )
+
+        # Check and store profiling attention check results
+        for ac in ATTENTION_CHECKS:
+            if ac.get("insert_after") and ac["id"] in submission.answers:
+                actual = submission.answers[ac["id"]]
+                expected = ac["expected_answer"]
+                passed = 1 if actual == expected else 0
+                conn.execute(
+                    """INSERT INTO attention_checks
+                       (session_id, check_id, expected, actual, passed, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (session_id, ac["id"], expected, actual, passed, datetime.utcnow().isoformat()),
+                )
 
     # Load this session's schedule
     schedules = load_schedules()
@@ -408,16 +462,17 @@ def submit_evaluation(submission: EvaluationSubmission):
     with get_db() as conn:
         conn.execute(
             """INSERT INTO evaluations
-               (session_id, task_id, eval_content, eval_tone, eval_amount, eval_agency, eval_overall, open_ended, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (session_id, task_id, eval_tone, eval_verbosity, eval_structure, eval_initiative, eval_overall, eval_relevance, open_ended, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 submission.session_id,
                 submission.task_id,
-                submission.eval_content,
                 submission.eval_tone,
-                submission.eval_amount,
-                submission.eval_agency,
+                submission.eval_verbosity,
+                submission.eval_structure,
+                submission.eval_initiative,
                 submission.eval_overall,
+                submission.eval_relevance,
                 submission.open_ended,
                 datetime.utcnow().isoformat(),
             ),
@@ -436,6 +491,20 @@ def submit_post_study(submission: PostStudySubmission):
     return {"status": "ok"}
 
 
+@app.post("/api/attention-check/submit")
+def submit_attention_check(submission: AttentionCheckSubmission):
+    """Store an evaluation-phase attention check result."""
+    passed = 1 if submission.actual == submission.expected else 0
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO attention_checks
+               (session_id, check_id, expected, actual, passed, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (submission.session_id, submission.check_id, submission.expected, submission.actual, passed, datetime.utcnow().isoformat()),
+        )
+    return {"status": "ok", "passed": bool(passed)}
+
+
 @app.get("/api/admin/export")
 def export_data():
     """Export all study data for analysis (admin endpoint)."""
@@ -443,11 +512,13 @@ def export_data():
         sessions = [dict(r) for r in conn.execute("SELECT * FROM sessions").fetchall()]
         responses = [dict(r) for r in conn.execute("SELECT * FROM responses").fetchall()]
         evaluations = [dict(r) for r in conn.execute("SELECT * FROM evaluations").fetchall()]
+        attention_checks = [dict(r) for r in conn.execute("SELECT * FROM attention_checks").fetchall()]
 
     return {
         "sessions": sessions,
         "responses": responses,
         "evaluations": evaluations,
+        "attention_checks": attention_checks,
         "questions": PROFILING_QUESTIONS,
         "tasks": TASKS,
     }
